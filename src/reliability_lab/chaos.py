@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from pathlib import Path
 
 from reliability_lab.cache import ResponseCache, SharedRedisCache
@@ -51,7 +52,7 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
 def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
     """Derive recovery time from circuit breaker transition logs.
 
-    TODO(student): Implement recovery time calculation:
+    Recovery time calculation:
     1. For each breaker in gateway.breakers.values():
        - Walk breaker.transition_log entries
        - Track when circuit goes to "open" (save ts)
@@ -62,13 +63,22 @@ def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
     Each transition_log entry is a dict with keys: "from", "to", "reason", "ts"
     where "ts" is time.time() (epoch seconds).
     """
-    raise NotImplementedError("TODO: implement calculate_recovery_time_ms()")
+    recoveries: list[float] = []
+    for breaker in gateway.breakers.values():
+        opened_at: float | None = None
+        for transition in breaker.transition_log:
+            if transition["to"] == "open":
+                opened_at = float(transition["ts"])
+            elif transition["to"] == "closed" and opened_at is not None:
+                recoveries.append((float(transition["ts"]) - opened_at) * 1000)
+                opened_at = None
+    return sum(recoveries) / len(recoveries) if recoveries else None
 
 
 def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig) -> RunMetrics:
     """Run a single named chaos scenario.
 
-    TODO(student): Implement the scenario runner:
+    Scenario runner behavior:
     1. Build gateway with build_gateway(config, scenario.provider_overrides or None)
     2. Create empty RunMetrics()
     3. Loop config.load_test.requests times:
@@ -86,28 +96,66 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
     5. Set recovery_time_ms via calculate_recovery_time_ms(gateway)
     6. Return metrics
     """
-    raise NotImplementedError("TODO: implement run_scenario()")
+    gateway = build_gateway(config, scenario.provider_overrides or None)
+    metrics = RunMetrics()
+    prompt_rng = random.Random(f"{scenario.name}:{config.load_test.requests}")
+    for _ in range(config.load_test.requests):
+        prompt = prompt_rng.choice(queries)
+        started = time.perf_counter()
+        result = gateway.complete(prompt)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        metrics.total_requests += 1
+        metrics.estimated_cost += result.estimated_cost
+        if result.cache_hit:
+            metrics.cache_hits += 1
+            metrics.estimated_cost_saved += 0.001
+        if result.route == "fallback":
+            metrics.fallback_successes += 1
+            metrics.successful_requests += 1
+        elif result.route == "static_fallback":
+            metrics.static_fallbacks += 1
+            metrics.failed_requests += 1
+        else:
+            metrics.successful_requests += 1
+        if elapsed_ms > 0:
+            metrics.latencies_ms.append(elapsed_ms)
+    metrics.circuit_open_count = sum(
+        1
+        for breaker in gateway.breakers.values()
+        for transition in breaker.transition_log
+        if transition["to"] == "open"
+    )
+    metrics.recovery_time_ms = calculate_recovery_time_ms(gateway)
+    return metrics
+
+
+def _scenario_passes(result: RunMetrics, scenario: ScenarioConfig) -> bool:
+    """Apply explicit, scenario-aware acceptance criteria."""
+    if result.total_requests == 0 or result.availability < 0.9:
+        return False
+    if scenario.name == "primary_timeout_100":
+        return result.fallback_success_rate >= 0.9
+    if scenario.name == "all_healthy":
+        return result.static_fallbacks == 0
+    return result.successful_requests > 0
 
 
 def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
     """Run all named scenarios from config, or a default run if none defined.
 
-    TODO(student): Add a cache vs no-cache comparison scenario.
-    Extend with your own custom scenarios (e.g., cost cap near limit).
+    Also records a cache-vs-no-cache comparison for the final report.
     """
     if not config.scenarios:
         default_scenario = ScenarioConfig(name="default", description="baseline run")
         metrics = run_scenario(config, queries, default_scenario)
-        metrics.scenarios = {"default": "pass" if metrics.successful_requests > 0 else "fail"}
+        metrics.scenarios = {"default": "pass" if _scenario_passes(metrics, default_scenario) else "fail"}
         return metrics
 
     combined = RunMetrics()
     for scenario in config.scenarios:
         result = run_scenario(config, queries, scenario)
 
-        # TODO(student): Define pass/fail criteria per scenario.
-        # Example: primary_timeout_100 passes if fallback_success_rate > 0.9
-        passed = result.successful_requests > 0
+        passed = _scenario_passes(result, scenario)
         combined.scenarios[scenario.name] = "pass" if passed else "fail"
 
         combined.total_requests += result.total_requests
@@ -125,5 +173,17 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
                 combined.recovery_time_ms = result.recovery_time_ms
             else:
                 combined.recovery_time_ms = (combined.recovery_time_ms + result.recovery_time_ms) / 2
+
+    comparison_scenario = ScenarioConfig(name="cache_comparison", description="cache enabled vs disabled")
+    comparison_random_state = random.getstate()
+    with_cache = run_scenario(config, queries, comparison_scenario)
+    random.setstate(comparison_random_state)
+    without_cache_config = config.model_copy(deep=True)
+    without_cache_config.cache.enabled = False
+    without_cache = run_scenario(without_cache_config, queries, comparison_scenario)
+    combined.cache_comparison = {
+        "with_cache": with_cache.to_report_dict(),
+        "without_cache": without_cache.to_report_dict(),
+    }
 
     return combined

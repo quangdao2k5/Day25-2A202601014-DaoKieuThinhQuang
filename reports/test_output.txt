@@ -1,0 +1,14 @@
+Submission verification
+=======================
+
+Environment: editable install with dev dependencies, Redis 7 via docker compose.
+
+pytest -q
+................................XXXXXXX                               [100%]
+35 passed, 7 xpassed
+
+ruff check src scripts
+All checks passed!
+
+mypy src
+Success: no issues found in 8 source files

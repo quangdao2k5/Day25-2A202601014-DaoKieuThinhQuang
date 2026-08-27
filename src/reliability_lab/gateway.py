@@ -34,7 +34,7 @@ class ReliabilityGateway:
     def complete(self, prompt: str) -> GatewayResponse:
         """Return a reliable response or a static fallback.
 
-        TODO(student): Implement the full request routing pipeline:
+        Request routing pipeline:
 
         1. CACHE CHECK — if self.cache is not None:
            - Call self.cache.get(prompt) → (cached_text, score)
@@ -55,7 +55,39 @@ class ReliabilityGateway:
              text="The service is temporarily degraded. Please try again soon."
              route="static_fallback", error=last_error
 
-        BONUS TODO: Add cost budget tracking — if cumulative cost exceeds a threshold,
-        skip expensive providers and route to cache or cheaper fallback.
+        Cost-budget routing is documented as a future production improvement.
         """
-        raise NotImplementedError("TODO: implement complete()")
+        if self.cache is not None:
+            cached_text, score = self.cache.get(prompt)
+            if cached_text is not None:
+                return GatewayResponse(cached_text, f"cache_hit:{score:.2f}", None, True, 0.0, 0.0)
+
+        last_error: str | None = None
+        for index, provider in enumerate(self.providers):
+            breaker = self.breakers[provider.name]
+            try:
+                response: ProviderResponse = breaker.call(provider.complete, prompt)
+            except (ProviderError, CircuitOpenError) as exc:
+                last_error = f"{provider.name}: {exc}"
+                continue
+            if self.cache is not None:
+                self.cache.set(prompt, response.text, {"provider": provider.name})
+            route = "primary" if index == 0 else "fallback"
+            return GatewayResponse(
+                response.text,
+                route,
+                response.provider,
+                False,
+                response.latency_ms,
+                response.estimated_cost,
+            )
+
+        return GatewayResponse(
+            "The service is temporarily degraded. Please try again soon.",
+            "static_fallback",
+            None,
+            False,
+            0.0,
+            0.0,
+            last_error,
+        )
