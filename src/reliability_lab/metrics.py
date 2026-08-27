@@ -21,10 +21,12 @@ class RunMetrics(BaseModel):
     recovery_time_ms: float | None = None
     estimated_cost: float = 0.0
     estimated_cost_saved: float = 0.0
+    wall_time_ms: float = 0.0
     latencies_ms: list[float] = Field(default_factory=list)
     scenarios: dict[str, str] = Field(default_factory=dict)
     scenario_metrics: dict[str, dict[str, object]] = Field(default_factory=dict)
     cache_comparison: dict[str, dict[str, object]] = Field(default_factory=dict)
+    concurrency_comparison: dict[str, dict[str, object]] = Field(default_factory=dict)
 
     @property
     def availability(self) -> float:
@@ -43,6 +45,10 @@ class RunMetrics(BaseModel):
         denom = self.fallback_successes + self.static_fallbacks
         return self.fallback_successes / denom if denom else 0.0
 
+    @property
+    def throughput_rps(self) -> float:
+        return self.total_requests / (self.wall_time_ms / 1000) if self.wall_time_ms > 0 else 0.0
+
     def percentile(self, q: float) -> float:
         return percentile(self.latencies_ms, q)
 
@@ -60,9 +66,12 @@ class RunMetrics(BaseModel):
             "recovery_time_ms": self.recovery_time_ms,
             "estimated_cost": round(self.estimated_cost, 6),
             "estimated_cost_saved": round(self.estimated_cost_saved, 6),
+            "wall_time_ms": round(self.wall_time_ms, 2),
+            "throughput_rps": round(self.throughput_rps, 2),
             "scenarios": self.scenarios,
             "scenario_metrics": self.scenario_metrics,
             "cache_comparison": self.cache_comparison,
+            "concurrency_comparison": self.concurrency_comparison,
         }
 
     def write_json(self, path: str | Path) -> None:
@@ -82,13 +91,20 @@ class RunMetrics(BaseModel):
         scenarios = cast(dict[str, str], report.pop("scenarios", {}))
         report.pop("scenario_metrics", None)
         comparisons = cast(dict[str, dict[str, object]], report.pop("cache_comparison", {}))
+        report.pop("concurrency_comparison", None)
         report.update({f"scenario_{name}": status for name, status in scenarios.items()})
         for mode, values in comparisons.items():
             report.update(
                 {
                     f"cache_{mode}_{name}": value
                     for name, value in values.items()
-                    if name not in {"scenarios", "cache_comparison"}
+                    if name
+                    not in {
+                        "scenarios",
+                        "scenario_metrics",
+                        "cache_comparison",
+                        "concurrency_comparison",
+                    }
                 }
             )
         destination = Path(path)

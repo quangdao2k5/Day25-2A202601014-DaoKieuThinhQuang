@@ -18,6 +18,9 @@ class CircuitBreakerConfig(BaseModel):
     failure_threshold: int = Field(gt=0)
     reset_timeout_seconds: float = Field(gt=0)
     success_threshold: int = Field(gt=0)
+    backend: str = "memory"
+    redis_url: str = "redis://localhost:6379/0"
+    state_ttl_seconds: int = Field(default=300, gt=0)
 
 
 class CacheConfig(BaseModel):
@@ -30,6 +33,13 @@ class CacheConfig(BaseModel):
 
 class LoadTestConfig(BaseModel):
     requests: int = Field(gt=0)
+    workers: int = Field(default=1, gt=0)
+
+
+class CostBudgetConfig(BaseModel):
+    enabled: bool = False
+    max_cost: float = Field(default=0.05, gt=0)
+    soft_limit_ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
 
 
 class ScenarioConfig(BaseModel):
@@ -43,6 +53,7 @@ class LabConfig(BaseModel):
     circuit_breaker: CircuitBreakerConfig
     cache: CacheConfig
     load_test: LoadTestConfig
+    cost_budget: CostBudgetConfig = Field(default_factory=CostBudgetConfig)
     scenarios: list[ScenarioConfig] = Field(default_factory=list)
 
 

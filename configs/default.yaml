@@ -11,6 +11,9 @@ circuit_breaker:
   failure_threshold: 3
   reset_timeout_seconds: 2
   success_threshold: 1
+  backend: memory
+  redis_url: "redis://localhost:6379/0"
+  state_ttl_seconds: 300
 cache:
   enabled: true
   backend: memory          # "memory" (default) or "redis" (requires docker compose up -d)
@@ -19,6 +22,11 @@ cache:
   redis_url: "redis://localhost:6379/0"
 load_test:
   requests: 100
+  workers: 8
+cost_budget:
+  enabled: false
+  max_cost: 0.05
+  soft_limit_ratio: 0.8
 
 # Chaos scenarios: each overrides provider fail_rate for targeted testing.
 # Named scenarios used by the reproducible chaos simulation.

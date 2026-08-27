@@ -14,3 +14,16 @@ $ pytest -q tests/test_redis_cache.py
 The shared-state test writes through one SharedRedisCache instance and reads
 the same response through a second independent instance using the same prefix.
 The evidence key was deleted after capture.
+
+$ docker compose exec -T redis redis-cli HGETALL rl:circuit:evidence-shared
+state
+open
+failure_count
+1
+success_count
+0
+opened_at
+1787820183.72991
+
+Two RedisCircuitBreaker instances using this key observe the same OPEN state.
+The circuit evidence key was deleted after capture.

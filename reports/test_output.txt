@@ -4,11 +4,14 @@ Submission verification
 Environment: editable install with dev dependencies, Redis 7 via docker compose.
 
 $ make test
-................................XXXXXXX                               [100%]
-35 passed, 7 xpassed
+.....................................XXXXXXX                          [100%]
+40 passed, 7 xpassed
 
 $ make lint
 All checks passed!
 
 $ make typecheck
 Success: no issues found in 8 source files
+
+Stretch-goal coverage includes concurrent load, shared Redis circuit state,
+Redis graceful degradation, cost-aware routing, and Hypothesis properties.

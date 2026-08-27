@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from reliability_lab.cache import ResponseCache, SharedRedisCache
-from reliability_lab.circuit_breaker import CircuitBreaker
+from reliability_lab.circuit_breaker import CircuitBreaker, RedisCircuitBreaker
 from reliability_lab.config import LabConfig, ScenarioConfig
-from reliability_lab.gateway import ReliabilityGateway
+from reliability_lab.gateway import GatewayResponse, ReliabilityGateway
 from reliability_lab.metrics import RunMetrics
 from reliability_lab.providers import FakeLLMProvider
 
@@ -27,15 +28,24 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
     for p in config.providers:
         fail_rate = provider_overrides.get(p.name, p.fail_rate) if provider_overrides else p.fail_rate
         providers.append(FakeLLMProvider(p.name, fail_rate, p.base_latency_ms, p.cost_per_1k_tokens))
-    breakers = {
-        p.name: CircuitBreaker(
-            name=p.name,
-            failure_threshold=config.circuit_breaker.failure_threshold,
-            reset_timeout_seconds=config.circuit_breaker.reset_timeout_seconds,
-            success_threshold=config.circuit_breaker.success_threshold,
-        )
-        for p in config.providers
-    }
+    breakers: dict[str, CircuitBreaker] = {}
+    for p in config.providers:
+        if config.circuit_breaker.backend == "redis":
+            breakers[p.name] = RedisCircuitBreaker(
+                name=p.name,
+                failure_threshold=config.circuit_breaker.failure_threshold,
+                reset_timeout_seconds=config.circuit_breaker.reset_timeout_seconds,
+                success_threshold=config.circuit_breaker.success_threshold,
+                redis_url=config.circuit_breaker.redis_url,
+                state_ttl_seconds=config.circuit_breaker.state_ttl_seconds,
+            )
+        else:
+            breakers[p.name] = CircuitBreaker(
+                name=p.name,
+                failure_threshold=config.circuit_breaker.failure_threshold,
+                reset_timeout_seconds=config.circuit_breaker.reset_timeout_seconds,
+                success_threshold=config.circuit_breaker.success_threshold,
+            )
     cache: ResponseCache | SharedRedisCache | None = None
     if config.cache.enabled:
         if config.cache.backend == "redis":
@@ -46,7 +56,14 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
             )
         else:
             cache = ResponseCache(config.cache.ttl_seconds, config.cache.similarity_threshold)
-    return ReliabilityGateway(providers, breakers, cache)
+    budget = config.cost_budget.max_cost if config.cost_budget.enabled else None
+    return ReliabilityGateway(
+        providers,
+        breakers,
+        cache,
+        cost_budget=budget,
+        budget_soft_limit_ratio=config.cost_budget.soft_limit_ratio,
+    )
 
 
 def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
@@ -97,13 +114,29 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
     6. Return metrics
     """
     gateway = build_gateway(config, scenario.provider_overrides or None)
+    for breaker in gateway.breakers.values():
+        if isinstance(breaker, RedisCircuitBreaker):
+            breaker.reset_shared_state()
     metrics = RunMetrics()
     prompt_rng = random.Random(f"{scenario.name}:{config.load_test.requests}")
-    for _ in range(config.load_test.requests):
-        prompt = prompt_rng.choice(queries)
+    prompts = [prompt_rng.choice(queries) for _ in range(config.load_test.requests)]
+    scenario_started = time.perf_counter()
+
+    def invoke(prompt: str) -> tuple[GatewayResponse, float]:
         started = time.perf_counter()
         result = gateway.complete(prompt)
         elapsed_ms = (time.perf_counter() - started) * 1000
+        return result, elapsed_ms
+
+    if config.load_test.workers > 1:
+        with ThreadPoolExecutor(max_workers=config.load_test.workers) as executor:
+            results = list(executor.map(invoke, prompts))
+    else:
+        results = [invoke(prompt) for prompt in prompts]
+    metrics.wall_time_ms = (time.perf_counter() - scenario_started) * 1000
+
+    for result_object, elapsed_ms in results:
+        result = result_object
         metrics.total_requests += 1
         metrics.estimated_cost += result.estimated_cost
         if result.cache_hit:
@@ -168,6 +201,7 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
         combined.circuit_open_count += result.circuit_open_count
         combined.estimated_cost += result.estimated_cost
         combined.estimated_cost_saved += result.estimated_cost_saved
+        combined.wall_time_ms += result.wall_time_ms
         combined.latencies_ms.extend(result.latencies_ms)
         if result.recovery_time_ms is not None:
             if combined.recovery_time_ms is None:
@@ -186,5 +220,31 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
         "with_cache": with_cache.to_report_dict(),
         "without_cache": without_cache.to_report_dict(),
     }
+
+    sequential_config = config.model_copy(deep=True)
+    sequential_config.load_test.workers = 1
+    concurrent_config = config.model_copy(deep=True)
+    concurrent_config.load_test.workers = max(4, config.load_test.workers)
+    concurrency_scenario = ScenarioConfig(
+        name="concurrency_comparison",
+        description="sequential vs concurrent load",
+        provider_overrides={provider.name: 0.0 for provider in config.providers},
+    )
+    sequential = run_scenario(sequential_config, queries, concurrency_scenario)
+    concurrent = run_scenario(concurrent_config, queries, concurrency_scenario)
+    combined.concurrency_comparison = {
+        "sequential": sequential.to_report_dict(),
+        "concurrent": concurrent.to_report_dict(),
+    }
+    if combined.recovery_time_ms is None:
+        recovery_candidates = (with_cache, without_cache, sequential, concurrent)
+        combined.recovery_time_ms = next(
+            (
+                candidate.recovery_time_ms
+                for candidate in recovery_candidates
+                if candidate.recovery_time_ms is not None
+            ),
+            None,
+        )
 
     return combined

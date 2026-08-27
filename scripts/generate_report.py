@@ -36,9 +36,12 @@ def main() -> None:
         f"| failure_threshold | {config['circuit_breaker']['failure_threshold']} | Limits consecutive provider failures. |",
         f"| reset_timeout_seconds | {config['circuit_breaker']['reset_timeout_seconds']} | Allows recovery probes. |",
         f"| success_threshold | {config['circuit_breaker']['success_threshold']} | Closes after a successful probe. |",
+        f"| circuit backend | {config['circuit_breaker']['backend']} | Memory default; Redis enables shared state. |",
+        f"| circuit state TTL | {config['circuit_breaker']['state_ttl_seconds']} | Cleans stale shared state. |",
         f"| cache TTL | {config['cache']['ttl_seconds']} | Limits response staleness. |",
         f"| similarity_threshold | {config['cache']['similarity_threshold']} | Conservative semantic matching. |",
         f"| load_test requests | {config['load_test']['requests']} per scenario | Reproducible local chaos run. |",
+        f"| load_test workers | {config['load_test']['workers']} | Exercises thread-safe concurrent routing. |",
         f"| cache enabled | {config['cache']['enabled']} | Enables provider cost and latency savings. |",
         f"| cache backend | {config['cache']['backend']} | Memory by default; Redis supports shared deployments. |",
         f"| redis URL | {config['cache']['redis_url']} | Local Docker Redis endpoint. |",
@@ -48,6 +51,8 @@ def main() -> None:
         f"| backup fail rate | {config['providers'][1]['fail_rate']} | Independent fallback failure rate. |",
         f"| backup latency | {config['providers'][1]['base_latency_ms']} ms | Simulated fallback latency. |",
         f"| backup cost/1K | {config['providers'][1]['cost_per_1k_tokens']} | Cheaper fallback cost. |",
+        f"| cost budget enabled | {config['cost_budget']['enabled']} | Optional production cost guardrail. |",
+        f"| cost soft limit | {config['cost_budget']['soft_limit_ratio']} | Routes to cheaper provider near budget. |",
         "", "## 3. SLO summary", "", "| SLI | Target | Actual | Met? |", "|---|---:|---:|---|",
         f"| Availability | >= 99% | {metrics.get('availability')} | {'Yes' if metrics.get('availability', 0) >= 0.99 else 'No'} |",
         f"| Latency P95 | < 2500 ms | {metrics.get('latency_p95_ms')} ms | {'Yes' if metrics.get('latency_p95_ms', 99999) < 2500 else 'No'} |",
@@ -57,7 +62,12 @@ def main() -> None:
         "", "## 4. Metrics", "", "| Metric | Value |", "|---|---:|",
     ]
     for key, value in metrics.items():
-        if key in {"scenarios", "scenario_metrics", "cache_comparison"}:
+        if key in {
+            "scenarios",
+            "scenario_metrics",
+            "cache_comparison",
+            "concurrency_comparison",
+        }:
             continue
         lines.append(f"| {key} | {value} |")
     expected = {
@@ -99,7 +109,24 @@ def main() -> None:
     without_cache = comparison.get("without_cache", {})
     for key in ["latency_p50_ms", "latency_p95_ms", "estimated_cost", "cache_hit_rate", "availability"]:
         lines.append(f"| {key} | {with_cache.get(key, 'N/A')} | {without_cache.get(key, 'N/A')} |")
-    lines += ["", "## 9. Next steps", "", "1. Coordinate circuit-breaker state across instances.", "2. Add seeded load tests and confidence intervals.", "3. Add response-quality checks and per-user rate limiting."]
+    concurrency = metrics.get("concurrency_comparison", {})
+    sequential = concurrency.get("sequential", {})
+    concurrent = concurrency.get("concurrent", {})
+    lines += [
+        "", "## 9. Extra-credit reliability features", "",
+        "| Feature | Evidence |", "|---|---|",
+        ("| Concurrent load | "
+         f"Sequential throughput={sequential.get('throughput_rps', 'N/A')} rps; "
+         f"concurrent throughput={concurrent.get('throughput_rps', 'N/A')} rps. |"),
+        "| Redis circuit state | Two breaker instances share OPEN state using Redis HINCRBY/EXPIRE. |",
+        "| Redis graceful degradation | Redis errors fall back to a privacy-safe in-memory cache. |",
+        "| Cost-aware routing | At 80% budget, providers are ordered by cost; at 100%, requests fail closed. |",
+        "| Property-based tests | Hypothesis checks breaker thresholds and similarity invariants. |",
+        "", "## 10. Next steps", "",
+        "1. Add confidence intervals around repeated benchmark runs.",
+        "2. Add response-quality checks and per-user rate limiting.",
+        "3. Move Redis breaker transitions to a Lua script for fully atomic distributed probes.",
+    ]
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text("\n".join(lines))
     print(f"wrote {args.out}")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from reliability_lab.cache import ResponseCache, SharedRedisCache
@@ -26,10 +27,16 @@ class ReliabilityGateway:
         providers: list[FakeLLMProvider],
         breakers: dict[str, CircuitBreaker],
         cache: ResponseCache | SharedRedisCache | None = None,
+        cost_budget: float | None = None,
+        budget_soft_limit_ratio: float = 0.8,
     ):
         self.providers = providers
         self.breakers = breakers
         self.cache = cache
+        self.cost_budget = cost_budget
+        self.budget_soft_limit_ratio = budget_soft_limit_ratio
+        self.cumulative_cost = 0.0
+        self._budget_lock = threading.Lock()
 
     def complete(self, prompt: str) -> GatewayResponse:
         """Return a reliable response or a static fallback.
@@ -63,7 +70,27 @@ class ReliabilityGateway:
                 return GatewayResponse(cached_text, f"cache_hit:{score:.2f}", None, True, 0.0, 0.0)
 
         last_error: str | None = None
-        for index, provider in enumerate(self.providers):
+        with self._budget_lock:
+            spent = self.cumulative_cost
+        if self.cost_budget is not None and spent >= self.cost_budget:
+            return GatewayResponse(
+                "The request budget is exhausted. Please try again later.",
+                "static_fallback",
+                None,
+                False,
+                0.0,
+                0.0,
+                "cost_budget_exhausted",
+            )
+
+        provider_chain = list(enumerate(self.providers))
+        if (
+            self.cost_budget is not None
+            and spent >= self.cost_budget * self.budget_soft_limit_ratio
+        ):
+            provider_chain.sort(key=lambda item: item[1].cost_per_1k_tokens)
+
+        for index, provider in provider_chain:
             breaker = self.breakers[provider.name]
             try:
                 response: ProviderResponse = breaker.call(provider.complete, prompt)
@@ -72,6 +99,8 @@ class ReliabilityGateway:
                 continue
             if self.cache is not None:
                 self.cache.set(prompt, response.text, {"provider": provider.name})
+            with self._budget_lock:
+                self.cumulative_cost += response.estimated_cost
             route = "primary" if index == 0 else "fallback"
             return GatewayResponse(
                 response.text,
