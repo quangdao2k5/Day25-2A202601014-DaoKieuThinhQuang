@@ -1,0 +1,16 @@
+$ docker compose exec -T redis redis-cli KEYS 'rl:evidence:*'
+rl:evidence:shared
+
+$ docker compose exec -T redis redis-cli HGETALL rl:evidence:shared
+query
+shared query
+response
+shared response
+
+$ pytest -q tests/test_redis_cache.py
+......                                                                   [100%]
+6 passed
+
+The shared-state test writes through one SharedRedisCache instance and reads
+the same response through a second independent instance using the same prefix.
+The evidence key was deleted after capture.

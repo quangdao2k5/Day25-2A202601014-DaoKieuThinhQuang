@@ -23,6 +23,7 @@ class RunMetrics(BaseModel):
     estimated_cost_saved: float = 0.0
     latencies_ms: list[float] = Field(default_factory=list)
     scenarios: dict[str, str] = Field(default_factory=dict)
+    scenario_metrics: dict[str, dict[str, object]] = Field(default_factory=dict)
     cache_comparison: dict[str, dict[str, object]] = Field(default_factory=dict)
 
     @property
@@ -60,6 +61,7 @@ class RunMetrics(BaseModel):
             "estimated_cost": round(self.estimated_cost, 6),
             "estimated_cost_saved": round(self.estimated_cost_saved, 6),
             "scenarios": self.scenarios,
+            "scenario_metrics": self.scenario_metrics,
             "cache_comparison": self.cache_comparison,
         }
 
@@ -78,6 +80,7 @@ class RunMetrics(BaseModel):
         """
         report = self.to_report_dict()
         scenarios = cast(dict[str, str], report.pop("scenarios", {}))
+        report.pop("scenario_metrics", None)
         comparisons = cast(dict[str, dict[str, object]], report.pop("cache_comparison", {}))
         report.update({f"scenario_{name}": status for name, status in scenarios.items()})
         for mode, values in comparisons.items():

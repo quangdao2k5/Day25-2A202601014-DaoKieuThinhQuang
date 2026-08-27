@@ -3,12 +3,12 @@ Submission verification
 
 Environment: editable install with dev dependencies, Redis 7 via docker compose.
 
-pytest -q
+$ make test
 ................................XXXXXXX                               [100%]
 35 passed, 7 xpassed
 
-ruff check src scripts
+$ make lint
 All checks passed!
 
-mypy src
+$ make typecheck
 Success: no issues found in 8 source files

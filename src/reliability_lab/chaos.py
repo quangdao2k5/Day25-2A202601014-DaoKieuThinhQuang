@@ -157,6 +157,7 @@ def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
 
         passed = _scenario_passes(result, scenario)
         combined.scenarios[scenario.name] = "pass" if passed else "fail"
+        combined.scenario_metrics[scenario.name] = result.to_report_dict()
 
         combined.total_requests += result.total_requests
         combined.successful_requests += result.successful_requests

@@ -14,9 +14,21 @@ def main() -> None:
     args = parser.parse_args()
     metrics = json.loads(Path(args.metrics).read_text())
     config = yaml.safe_load(Path("configs/default.yaml").read_text())
+    redis_metrics_path = Path("reports/metrics_redis.json")
+    redis_metrics = json.loads(redis_metrics_path.read_text()) if redis_metrics_path.exists() else {}
+    redis_evidence_path = Path("reports/redis_evidence.txt")
+    redis_evidence = (
+        redis_evidence_path.read_text().strip()
+        if redis_evidence_path.exists()
+        else "Redis evidence has not been generated yet."
+    )
     lines = [
         "# Day 25 Reliability Engineering Report", "", "## 1. Architecture summary", "",
-        "User -> Gateway -> Cache -> Circuit Breaker -> Provider chain -> Static fallback", "",
+        "```text", "User -> Gateway -> Cache -- hit --> Cached response",
+        "                    | miss", "                    v",
+        "             Primary breaker -> Primary provider",
+        "                    | failure/open", "                    v",
+        "              Backup breaker -> Backup provider -> Static fallback", "```", "",
         ("The gateway returns cache hits immediately, skips open provider circuits, "
          "falls back in provider order, and returns a static degraded response only "
          "when every provider fails."), "",
@@ -27,8 +39,15 @@ def main() -> None:
         f"| cache TTL | {config['cache']['ttl_seconds']} | Limits response staleness. |",
         f"| similarity_threshold | {config['cache']['similarity_threshold']} | Conservative semantic matching. |",
         f"| load_test requests | {config['load_test']['requests']} per scenario | Reproducible local chaos run. |",
+        f"| cache enabled | {config['cache']['enabled']} | Enables provider cost and latency savings. |",
         f"| cache backend | {config['cache']['backend']} | Memory by default; Redis supports shared deployments. |",
-        "| providers | primary + backup | Ordered fallback chain with independent breakers. |",
+        f"| redis URL | {config['cache']['redis_url']} | Local Docker Redis endpoint. |",
+        f"| primary fail rate | {config['providers'][0]['fail_rate']} | Baseline failure injection. |",
+        f"| primary latency | {config['providers'][0]['base_latency_ms']} ms | Simulated provider latency. |",
+        f"| primary cost/1K | {config['providers'][0]['cost_per_1k_tokens']} | Simulated provider cost. |",
+        f"| backup fail rate | {config['providers'][1]['fail_rate']} | Independent fallback failure rate. |",
+        f"| backup latency | {config['providers'][1]['base_latency_ms']} ms | Simulated fallback latency. |",
+        f"| backup cost/1K | {config['providers'][1]['cost_per_1k_tokens']} | Cheaper fallback cost. |",
         "", "## 3. SLO summary", "", "| SLI | Target | Actual | Met? |", "|---|---:|---:|---|",
         f"| Availability | >= 99% | {metrics.get('availability')} | {'Yes' if metrics.get('availability', 0) >= 0.99 else 'No'} |",
         f"| Latency P95 | < 2500 ms | {metrics.get('latency_p95_ms')} ms | {'Yes' if metrics.get('latency_p95_ms', 99999) < 2500 else 'No'} |",
@@ -38,7 +57,7 @@ def main() -> None:
         "", "## 4. Metrics", "", "| Metric | Value |", "|---|---:|",
     ]
     for key, value in metrics.items():
-        if key in {"scenarios", "cache_comparison"}:
+        if key in {"scenarios", "scenario_metrics", "cache_comparison"}:
             continue
         lines.append(f"| {key} | {value} |")
     expected = {
@@ -48,15 +67,24 @@ def main() -> None:
     }
     lines += ["", "## 5. Chaos scenarios", "", "| Scenario | Expected | Observed | Status |", "|---|---|---|---|"]
     for key, value in metrics.get("scenarios", {}).items():
-        lines.append(f"| {key} | {expected.get(key, 'Scenario completes safely.')} | Metrics and circuit transitions recorded. | {value} |")
+        details = metrics.get("scenario_metrics", {}).get(key, {})
+        observed = (
+            f"availability={details.get('availability', 'N/A')}, "
+            f"fallback={details.get('fallback_success_rate', 'N/A')}, "
+            f"cache_hit={details.get('cache_hit_rate', 'N/A')}, "
+            f"circuit_opens={details.get('circuit_open_count', 'N/A')}"
+        )
+        lines.append(f"| {key} | {expected.get(key, 'Scenario completes safely.')} | {observed} | {value} |")
     lines += [
         "",
         "", "## 6. Redis shared cache", "",
         ("Redis makes response state visible across gateway instances and applies "
          "server-side TTL. The Redis test suite verified shared state, expiry, "
          "privacy guardrails, and false-hit rejection: 6 passed."), "",
-        ("Redis CLI evidence: `docker compose exec redis redis-cli KEYS 'rl:test:*'` "
-         "shows the shared cache namespace during the test; fixtures clean it afterward."), "",
+        "Shared-state and Redis CLI evidence:", "", "```text", redis_evidence, "```", "",
+        (f"Redis-backed chaos run: availability={redis_metrics.get('availability', 'N/A')}, "
+         f"P95={redis_metrics.get('latency_p95_ms', 'N/A')} ms, "
+         f"cache_hit_rate={redis_metrics.get('cache_hit_rate', 'N/A')}."), "",
         "## 7. Failure analysis",
         "",
         "The cache reduces repeated-request latency and provider cost. False-hit guardrails reject privacy-sensitive queries and mismatched four-digit years, such as refund policy 2024 vs 2026. Remaining availability misses occur when all providers fail in the same request; production should add a third provider, health-aware routing, and bounded retries with jitter.",
